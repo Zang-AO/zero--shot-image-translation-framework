@@ -3,7 +3,9 @@ GPU加速超分辨率模块
 替代imge_reshape2.py的CPU版本，使用PyTorch GPU加速
 """
 
+import os
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
@@ -14,14 +16,51 @@ class SuperResolution:
     比ESPCN更简单但速度快10倍
     """
     
-    def __init__(self, scale_factor=2, device='cuda'):
+    def __init__(self, scale_factor=2, device='cuda', model_path=None):
         """
         Args:
             scale_factor: 放大倍数 (默认2倍)
             device: 'cuda' or 'cpu'
+            model_path: 可选，深度超分模型权重路径；若提供则加载深度模型用于放大
         """
         self.scale_factor = scale_factor
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        self.net = None
+
+        # 如果提供深度模型权重路径，则尝试加载
+        if model_path:
+            try:
+                self.net = DeepSRNet(scale_factor=self.scale_factor, num_channels=3).to(self.device)
+                ckpt = torch.load(model_path, map_location=self.device)
+                # 与其他checkpoint兼容
+                state = None
+                if isinstance(ckpt, dict):
+                    for key in ('state_dict', 'model_state_dict', 'net', 'sr_state_dict'):
+                        if key in ckpt:
+                            state = ckpt[key]
+                            break
+                    if state is None:
+                        sample_keys = list(ckpt.keys())[:10]
+                        if sample_keys and all(isinstance(k, str) and '.' in k for k in sample_keys):
+                            state = ckpt
+                else:
+                    state = ckpt
+
+                if state is not None:
+                    # strip module. prefix
+                    new_state = {}
+                    for k, v in state.items():
+                        nk = k[len('module.'):] if k.startswith('module.') else k
+                        new_state[nk] = v
+                    self.net.load_state_dict(new_state, strict=False)
+                    self.net.eval()
+                    print(f"✓ 深度超分模型已加载: {model_path}")
+                else:
+                    print(f"⚠ 未能解析深度超分checkpoint: {model_path}, 使用双线性插值作为回退")
+                    self.net = None
+            except Exception as e:
+                print(f"⚠ 加载深度超分模型失败: {e}, 使用双线性插值")
+                self.net = None
     
     def upsample(self, image_tensor):
         """
@@ -41,14 +80,24 @@ class SuperResolution:
         B, C, H, W = image_tensor.shape
         new_H = int(H * self.scale_factor)
         new_W = int(W * self.scale_factor)
-        
-        # GPU双线性插值
-        upsampled = F.interpolate(
-            image_tensor.to(self.device),
-            size=(new_H, new_W),
-            mode='bilinear',
-            align_corners=False
-        )
+
+        # 若加载了深度模型则使用网络推理（支持GPU）；否则回退到双线性插值
+        if self.net is not None:
+            # 网络通常期望[ B, C, H, W ] 范围为 0-1
+            x = image_tensor.unsqueeze(0) if image_tensor.ndim == 3 else image_tensor
+            x = x.to(self.device).float() / 255.0
+            with torch.no_grad():
+                out = self.net(x)
+            # out 期望范围 0-1
+            upsampled = out.clamp(0, 1) * 255.0
+        else:
+            # GPU双线性插值
+            upsampled = F.interpolate(
+                image_tensor.to(self.device),
+                size=(new_H, new_W),
+                mode='bilinear',
+                align_corners=False
+            )
         
         if single_image:
             return upsampled.squeeze(0)
@@ -72,14 +121,39 @@ class SuperResolution:
             tensor = torch.from_numpy(image_np).float().permute(2, 0, 1)  # [C, H, W]
             is_gray = False
         
-        # 放大
-        upsampled = self.upsample(tensor)
-        
-        # 转回numpy
+        # 放大：如果使用深度模型并且输入是灰度，则扩展为3通道，放大后再取通道
         if is_gray:
-            return upsampled.squeeze(0).cpu().numpy()  # [H*scale, W*scale]
+            # [1, H, W] -> [3, H, W]
+            tensor = tensor.repeat(3, 1, 1)
+            out = self.upsample(tensor)
+            out = out.squeeze(0).cpu().numpy()  # [3, H*scale, W*scale]
+            # 返回灰度，取第一个通道
+            return out[0]
         else:
+            upsampled = self.upsample(tensor)
             return upsampled.permute(1, 2, 0).cpu().numpy()  # [H*scale, W*scale, C]
+
+
+class DeepSRNet(nn.Module):
+    """A small ESPCN-like SR network using PixelShuffle for integer scale factors."""
+    def __init__(self, scale_factor=2, num_channels=3):
+        super().__init__()
+        self.scale = scale_factor
+        self.num_channels = num_channels
+        # simple conv layers
+        self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=5, padding=2)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        # output channels = C * scale^2 for pixelshuffle
+        self.conv3 = nn.Conv2d(64, num_channels * (self.scale ** 2), kernel_size=3, padding=1)
+        self.pixel_shuffle = nn.PixelShuffle(self.scale)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = self.conv3(x)
+        x = self.pixel_shuffle(x)
+        return x
 
 
 class GPUImageProcessor:
