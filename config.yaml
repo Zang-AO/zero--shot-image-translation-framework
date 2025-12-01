@@ -1,13 +1,13 @@
 # 基础配置
-batch_size: 4
+batch_size: 3
 num_epochs: 50
 learning_rate: 0.0002
 beta1: 0.5
-img_width: 512
-img_height: 512
+img_width: 256
+img_height: 256
 
 # 数据路径 (单域训练)
-data_root: "datasets/Source_domain/EDS"
+data_root: "datasets/Source_domain/KDXray"
 images_folder: "train/images"        # 彩色图像文件夹
 images_gray_folder: "train/images_gray"  # 灰度图像文件夹
 
@@ -16,7 +16,7 @@ images_gray_folder: "train/images_gray"  # 灰度图像文件夹
 # 使用示例: 
 #   pretrained_gen: "checkpoints/gen_best.pth"
 #   pretrained_disc: "checkpoints/disc_best.pth"
-pretrained_gen: checkpoints\checkpoint_epoch_EDS.pth               # 生成器预训练权重路径，null表示不加载
+pretrained_gen: null #checkpoints\checkpoint_epoch_EDS.pth               # 生成器预训练权重路径，null表示不加载
 pretrained_disc: null              # 判别器预训练权重路径，null表示不加载
 
 # 预处理配置
@@ -40,15 +40,15 @@ augmentation_params:
 # 中期(30-70%): 颜色损失提高,逐步增强色彩准确性
 # 后期(70-100%): L1损失为主,精细化像素级重建并保护微结构细节,避免过度平滑
 loss_weights:
-  l1: [0.5, 5.0, 100]             # L1像素损失 - 早期低,中期适度,后期主导精细重建
-  gan: [0.3, 1.0, 0.5]             # GAN对抗损失 - 中期适度增强,后期降低避免过度平滑
+  l1: [0.5, 5.0, 50]             # L1像素损失 - 早期低,中期适度,后期主导精细重建
+  gan: [1.0, 1.0, 0.5]             # GAN对抗损失 - 中期适度增强,后期降低避免过度平滑
   perceptual: [3.0, 2.0, 1.0]      # 感知损失/VGG - 早期主导学习语义特征,后期降低
-  color: [5.0, 50.0, 20.0]         # 颜色分布损失 - 中期大幅提高色彩准确性,后期适度保持
+  color: [20.0, 30.0, 30.0]         # 颜色分布损失 - 中期大幅提高色彩准确性,后期适度保持
 
 # 训练配置
 gradient_clip: 1.0                 # 梯度裁剪
-save_interval: 10                  # 保存间隔 (epoch)
-sample_interval: 5                 # 采样间隔 (epoch)
+save_interval: 1                  # 保存间隔 (epoch)
+sample_interval: 1                 # 采样间隔 (epoch)
 
 # 推理配置
 inference:
@@ -58,6 +58,3 @@ inference:
   img_height: 960                  # 推理目标高度
   decolor_only: true               # 仅去色,不加噪声
   batch_size: 1                    # 推理批次大小
-
-# UVCGAN专用配置 (已弃用)
-uvcgan_config: "../../uvcgan-main/configs/default.yml"
