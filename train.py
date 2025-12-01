@@ -535,8 +535,10 @@ class Trainer:
         
         # 随机采样
         sample_batch = next(iter(train_loader))
-        gray_img = sample_batch['gray'][:num_samples].to(device)
-        rgb_img = sample_batch['rgb'][:num_samples].to(device)
+        # 动态确定实际样本数量，避免索引越界
+        actual_samples = min(num_samples, sample_batch['gray'].size(0))
+        gray_img = sample_batch['gray'][:actual_samples].to(device)
+        rgb_img = sample_batch['rgb'][:actual_samples].to(device)
         
         with torch.no_grad():
             fake_rgb = self.gen(gray_img)
@@ -549,9 +551,9 @@ class Trainer:
             return img
         
         # 绘制对比图
-        fig, axes = plt.subplots(num_samples, 3, figsize=(12, 4*num_samples))
+        fig, axes = plt.subplots(actual_samples, 3, figsize=(12, 4*actual_samples))
         
-        for i in range(num_samples):
+        for i in range(actual_samples):
             # 灰度输入 (squeeze掉通道维度)
             gray = tensor_to_img(gray_img[i]).squeeze()
             axes[i, 0].imshow(gray, cmap='gray')

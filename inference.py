@@ -47,6 +47,7 @@ class ZSXTInference:
         inference_cfg = self.config.get('inference', {})
         self.sr_enabled = inference_cfg.get('sr_enabled', True)
         self.sr_scale = inference_cfg.get('sr_scale_factor', 2)
+        self.sr_model_path = inference_cfg.get('sr_model_path', None)
         self.target_size = (
             inference_cfg.get('img_width', 640),
             inference_cfg.get('img_height', 640)
@@ -55,7 +56,7 @@ class ZSXTInference:
         
         # 初始化超分辨率模块
         if self.sr_enabled:
-            self.sr_module = SuperResolution(scale_factor=self.sr_scale, device=self.device)
+            self.sr_module = SuperResolution(scale_factor=self.sr_scale, device=self.device, model_path=self.sr_model_path)
             print(f"✓ 超分辨率已启用 ({self.sr_scale}x)")
         else:
             self.sr_module = None
@@ -65,12 +66,46 @@ class ZSXTInference:
         print(f"[Model] 加载检查点: {checkpoint_path}")
         self.generator = GeneratorUNet(input_channels=1, output_channels=3).to(self.device)
         
-        # 兼容不同checkpoint格式
+        # 兼容不同checkpoint格式，支持常见键名并处理 DataParallel 前缀
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-            self.generator.load_state_dict(checkpoint['state_dict'])
+
+        # 从 checkpoint 中提取模型权重字典
+        state_dict = None
+        if isinstance(checkpoint, dict):
+            # 常见字段
+            for key in ('state_dict', 'model_state_dict', 'gen_state_dict', 'generator_state_dict', 'generator', 'gen'):
+                if key in checkpoint:
+                    state_dict = checkpoint[key]
+                    break
+            # 如果没有常见字段，可能 checkpoint 本身就是 state_dict
+            if state_dict is None:
+                # 判断字典的键是否看起来像参数名 (含有点号)
+                sample_keys = list(checkpoint.keys())[:10]
+                if sample_keys and all(isinstance(k, str) and '.' in k for k in sample_keys):
+                    state_dict = checkpoint
         else:
-            self.generator.load_state_dict(checkpoint)
+            state_dict = checkpoint
+
+        if state_dict is None:
+            raise RuntimeError(f'无法从checkpoint中找到模型权重: {checkpoint_path}')
+
+        # 处理 DataParallel 保存的 'module.' 前缀
+        new_state = {}
+        for k, v in state_dict.items():
+            new_key = k
+            if k.startswith('module.'):
+                new_key = k[len('module.'):]
+            new_state[new_key] = v
+
+        # 尝试加载，使用 strict=False 以兼容部分键不匹配的检查点
+        load_res = self.generator.load_state_dict(new_state, strict=False)
+        # 打印提示信息
+        missing = load_res.missing_keys if hasattr(load_res, 'missing_keys') else []
+        unexpected = load_res.unexpected_keys if hasattr(load_res, 'unexpected_keys') else []
+        if missing:
+            print(f"⚠ 加载checkpoint时缺失键 ({len(missing)}): {missing[:5]}{'...' if len(missing)>5 else ''}")
+        if unexpected:
+            print(f"⚠ 加载checkpoint时多余键 ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected)>5 else ''}")
         
         self.generator.eval()
         print(f"✓ 模型加载成功 (设备: {self.device})")
@@ -176,10 +211,11 @@ class ZSXTInference:
                 # 推理
                 rgb_img = self.infer_single(gray_tensor)
                 
-                # 保存 (保持原始尺寸)
-                if rgb_img.shape[:2] != original_size[::-1]:
-                    rgb_img = cv2.resize(rgb_img, original_size, interpolation=cv2.INTER_LINEAR)
-                
+                # 保存 (保持目标推理分辨率 self.target_size)
+                target_w, target_h = self.target_size
+                if rgb_img.shape[:2] != (target_h, target_w):
+                    rgb_img = cv2.resize(rgb_img, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
                 cv2.imwrite(output_path, rgb_img)
                 
             except Exception as e:
@@ -212,14 +248,18 @@ class ZSXTInference:
 
 def main():
     parser = argparse.ArgumentParser(description='ZSXT推理脚本')
-    parser.add_argument('--input', type=str, required=True,
-                       help='输入图像文件夹路径 (e.g., CLC_extract/images)')
-    parser.add_argument('--output', type=str, required=True,
-                       help='输出图像文件夹路径 (e.g., CLC_extract_zsxt/images)')
-    parser.add_argument('--checkpoint', type=str, default='checkpoints/gen_best.pth',
-                       help='模型权重路径 (默认: checkpoints/gen_best.pth)')
+    parser.add_argument('--input', type=str,
+                        default='D:\MyProg\ZSXT_Article\_code\datasets\Target_domain\EDS_test\PID_extract\images',
+                        help='输入图像文件夹路径 (默认: datasets/Target_domain/KDXray_test/CLC_extract/images)')
+    parser.add_argument('--output', type=str,
+                        default='D:\MyProg\ZSXT_Article\_code\datasets\Target_domain\EDS_test\PID_extract_ZSXT\images',
+                        help='输出图像文件夹路径 (默认: datasets/Target_domain/KDXray_test/CLC_extract_KD/images)')
+    parser.add_argument('--checkpoint', type=str, default='D:\MyProg\ZSXT_Article\_code\EDS_results\checkpoints_EDS\gen_best.pth',
+                        help='模型权重路径 (默认: checkpoints/gen_best.pth)')
     parser.add_argument('--config', type=str, default='config.yaml',
                        help='配置文件路径 (默认: config.yaml)')
+    parser.add_argument('--sr-model', type=str, default=None,
+                       help='可选深度超分模型权重路径，优先于配置文件')
     parser.add_argument('--device', type=str, default='cuda',
                        help='设备 (cuda/cpu, 默认: cuda)')
     parser.add_argument('--no-copy-labels', action='store_true',
@@ -233,6 +273,10 @@ def main():
         config_path=args.config,
         device=args.device
     )
+
+    # 如果命令行传入深度SR模型路径，优先使用它
+    if args.sr_model:
+        inferencer.sr_module = SuperResolution(scale_factor=inferencer.sr_scale, device=inferencer.device, model_path=args.sr_model)
     
     # 执行推理
     inferencer.infer_folder(
