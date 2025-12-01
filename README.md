@@ -1,6 +1,6 @@
 # ZSXT - Zero-Shot X-Ray Translation Framework
 
-轻量级、高效的医学X光无监督跨域翻译框架。
+轻量级、高效的X光无监督跨域翻译框架。
 
 ## 🎯 核心脚本
 
@@ -146,3 +146,4 @@ batch_size: 1
 
 **Version**: 1.0.0  
 **Updated**: 2025-11-30
+
